@@ -29,6 +29,7 @@ interface StaticProduct {
   evidence: Partial<Record<Attribute, string>>;
   packVolumeMl: number | null;
   packVolumeEvidence?: string;
+  packWeightG: number | null;
 }
 
 function volumeToMl(v: { unit: string; value: number } | undefined): number | null {
@@ -80,6 +81,9 @@ function toStatic(p: any, category: string): StaticProduct {
   const units: Array<{ unitId: string; sizeInBaseUnits: number }> = p.units ?? [];
   const perBase = units.find((u) => u.unitId === p.salesUnit)?.sizeInBaseUnits ?? (p.salesUnit === p.baseUnit ? 1 : null);
   const baseConv = (s.unitConversions ?? []).find((u: any) => u.synkkaPackagingType === "BASE_UNIT_OR_EACH");
+  const weight = baseConv?.netWeight;
+  const grams = weight?.unit === "KGM" ? weight.value * 1000 : weight?.unit === "GRM" ? weight.value : null;
+  const packWeightG = p.salesUnit === "KG" ? 1000 : perBase != null && grams != null ? Math.round(perBase * grams) : null;
   let baseMl = volumeToMl(baseConv?.volume);
   let packVolumeEvidence = "GS1 base-unit volume × sales-unit size";
   if (baseMl == null) {
@@ -87,7 +91,7 @@ function toStatic(p: any, category: string): StaticProduct {
     packVolumeEvidence = "Base-unit volume parsed from product name × sales-unit size";
   }
   const packVolumeMl = perBase != null && baseMl != null ? Math.round(perBase * baseMl) : null;
-  return { id: p.id, name, category, salesUnit: p.salesUnit, attributes, evidence, packVolumeMl, packVolumeEvidence };
+  return { id: p.id, name, category, salesUnit: p.salesUnit, attributes, evidence, packVolumeMl, packVolumeEvidence, packWeightG };
 }
 
 export interface ValioConfig {
@@ -113,6 +117,7 @@ export class ValioProvider implements Provider {
     ],
   };
   private catalog: StaticProduct[] | null = null;
+  private ingredientCatalog: StaticProduct[] | null = null;
 
   constructor(private cfg: ValioConfig) {}
 
@@ -126,6 +131,31 @@ export class ValioProvider implements Provider {
     }
     this.catalog = out;
     return out;
+  }
+
+  private loadIngredientCatalog(): StaticProduct[] {
+      if (this.ingredientCatalog) return this.ingredientCatalog;
+      const raw = JSON.parse(readFileSync(this.cfg.productDataPath, "utf8")) as any[];
+      this.ingredientCatalog = raw.filter((p) => !p.deleted).map((p) => toStatic(p, p.category));
+      return this.ingredientCatalog!;
+    }
+
+    async searchIngredients(query: string, requestedDate: string) {
+      const words = query.toLowerCase().match(/[a-zåäö0-9]+/g) ?? [];
+      if (!words.length) return [];
+      const matches = this.loadIngredientCatalog().filter((p) => {
+        const name = p.name.toLowerCase();
+        return words.every((word) => name.includes(word));
+      }).slice(0, 100);
+      const quoted = await this.quote(matches, requestedDate);
+      return quoted.map((offer, index) => ({ ...offer, packWeightG: matches[index].packWeightG }));
+    }
+
+    async quoteIngredients(skus: string[], requestedDate: string) {
+      const set = new Set(skus);
+      const matches = this.loadIngredientCatalog().filter((p) => set.has(p.id));
+      const quoted = await this.quote(matches, requestedDate);
+      return quoted.map((offer, index) => ({ ...offer, packWeightG: matches[index].packWeightG }));
   }
 
   private async post(path: string, body: unknown): Promise<any> {

@@ -35,6 +35,31 @@ export const openApiDocument = {
   servers: [{ url: "/api/v1" }],
   security: [{ bearer: [] }],
   paths: {
+    "/assistant/classify": {
+      post: { operationId: "classify_request", summary: "Route a request to the milk or ingredient-basket workflow", security: [], requestBody: { required: true, ...json({ type: "object", required: ["text"], properties: { text: { type: "string" } } }) }, responses: { "200": { description: "Request kind and extracted date and budget hints" }, ...errors } },
+    },
+    "/baskets/suggest": {
+      post: { operationId: "suggest_ingredients", summary: "Estimate essential ingredients for buyer review", security: [], requestBody: { required: true, ...json({ type: "object", required: ["text", "servings"], properties: { text: { type: "string" }, servings: { type: "integer", minimum: 1 } } }) }, responses: { "200": { description: "Suggested ingredients, estimated grams and explanation" }, ...errors } },
+    },
+    "/baskets/recommend": {
+      post: { operationId: "recommend_ingredient_products", summary: "Select matching products and whole-pack quantities for reviewed ingredients", security: [], requestBody: { required: true, ...json({ type: "object", required: ["deliveryDate", "dietaryNotes", "ingredients"], properties: { deliveryDate: { type: "string", format: "date" }, dietaryNotes: { type: "string" }, ingredients: { type: "array", items: { type: "object", required: ["name", "grams"], properties: { name: { type: "string" }, grams: { type: "integer", minimum: 1 } } } } } }) }, responses: { "200": { description: "Product recommendations or explicit missing matches" }, ...errors } },
+    },
+    "/baskets/search": {
+      post: { operationId: "search_ingredients", summary: "Search and quote up to 100 matching Valio catalog products", security: [], requestBody: { required: true, ...json({ type: "object", required: ["query", "deliveryDate"], properties: { query: { type: "string" }, deliveryDate: { type: "string", format: "date" } } }) }, responses: { "200": { description: "Available matching products; terminal stock is unconfirmed" }, ...errors } },
+    },
+    "/baskets/preview": {
+      post: { operationId: "preview_ingredient_basket", summary: "Requote selected products and produce fingerprinted basket terms", security: [], requestBody: { required: true, ...json({ type: "object", required: ["description", "deliveryDate", "dietaryNotes", "budgetCents", "budgetIsLimit", "lines"], properties: { description: { type: "string" }, deliveryDate: { type: "string", format: "date" }, dietaryNotes: { type: "string" }, budgetCents: { type: ["integer", "null"] }, budgetIsLimit: { type: "boolean" }, lines: { type: "array", items: { type: "object", required: ["ingredient", "sku", "packs"], properties: { ingredient: { type: "string" }, sku: { type: "string" }, packs: { type: "integer", minimum: 1 }, requiredGrams: { type: "integer", minimum: 1, description: "Approved ingredient weight; selected packs must cover it using verified catalog pack weights." } } } } } }) }, responses: { "200": { description: "Basket terms, approval reasons and fingerprint" }, ...errors } },
+    },
+    "/baskets": {
+      get: { operationId: "list_ingredient_baskets", summary: "List saved ingredient baskets", responses: { "200": { description: "Saved baskets" }, ...errors } },
+      post: { operationId: "create_ingredient_basket", summary: "Confirm previously reviewed basket terms", requestBody: { required: true, ...json({ type: "object", required: ["input", "fingerprint"], properties: { input: { type: "object" }, fingerprint: { type: "string" } } }) }, responses: { "200": { description: "Approved or awaiting manager approval" }, "409": { description: "Terms changed or simulation disabled" }, ...errors } },
+    },
+    "/baskets/{id}": {
+      get: { operationId: "get_ingredient_basket", summary: "Retrieve a saved basket", parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], responses: { "200": { description: "Basket status" }, ...errors } },
+    },
+    ...Object.fromEntries(["approve", "reject", "submit"].map((action) => [`/baskets/{id}/${action}`, {
+      post: { operationId: `${action}_ingredient_basket`, summary: `${action} a basket using its reviewed fingerprint`, parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }], requestBody: { required: true, ...json({ type: "object", required: ["fingerprint"], properties: { fingerprint: { type: "string" } } }) }, responses: { "200": { description: "Updated basket" }, "409": { description: "Stale terms or invalid basket status" }, ...errors } },
+    }])),
     "/catalog": {
       get: {
         operationId: "list_available_products",

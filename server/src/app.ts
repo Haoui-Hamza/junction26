@@ -6,6 +6,7 @@ import { openDb, type DB } from "./db.js";
 import { parseRequestLlm, parseRequestRules, ValidationError } from "./domain/intake.js";
 import type { Actor } from "./domain/types.js";
 import { runPurchasingAgent } from "./agent.js";
+import { BasketService, basketInputSchema, classifyRequest, recommendationSchema, recommendIngredients, suggestIngredients } from "./baskets.js";
 import { describeDate, formatEur, helsinkiDate, makeClock, type Clock } from "./domain/util.js";
 import { openApiDocument } from "./openapi.js";
 import { OrderService, ServiceError } from "./orders.js";
@@ -77,6 +78,9 @@ export function createApp(cfg: AppConfig, opts: { db?: DB; clock?: Clock } = {})
     ? new SimulatedOrderProvider(quoteProvider, db, clock)
     : quoteProvider;
   const service = new OrderService(db, provider, clock);
+  const basketService = quoteProvider instanceof ValioProvider
+    ? new BasketService(db, quoteProvider, clock, cfg.simulateValioOrders, service.getPolicy().autoLimitCents)
+    : null;
 
   const actors: Record<string, Actor> = {
     [cfg.tokens.agent]: { id: "agent:kitchen-purchasing", name: "Kitchen purchasing agent", role: "agent" },
@@ -131,6 +135,59 @@ export function createApp(cfg: AppConfig, opts: { db?: DB; clock?: Clock } = {})
   const RevisionRef = z.object({ revision: z.number().int().positive(), fingerprint: z.string().min(16), reason: z.string().max(500).optional() });
 
   const api = express.Router();
+  const baskets = () => {
+    if (!basketService) throw new ServiceError(503, "BASKET_PROVIDER_UNAVAILABLE", "Ingredient search requires the Valio provider. Set PROVIDER=valio and restart the app.");
+    return basketService;
+  };
+
+  api.post("/assistant/classify", wrap(async (req) => {
+    optionalReadActor(req, "classify");
+    const { text, manual } = parse(z.object({ text: z.string().trim().min(1).max(2000), manual: z.boolean().optional() }), req.body);
+    return { kind: await classifyRequest(text, manual ? undefined : cfg.llm.apiKey, cfg.llm.model), hints: parseRequestRules(text, clock.now()).draft };
+  }));
+  api.post("/baskets/suggest", wrap(async (req) => {
+    optionalReadActor(req, "suggest");
+    const { text, servings } = parse(z.object({ text: z.string().trim().min(1).max(2000), servings: z.number().int().min(1).max(100000) }), req.body);
+    if (!cfg.llm.apiKey) throw new ServiceError(503, "LLM_NOT_CONFIGURED", "Ingredient suggestions need an OpenAI key. Add ingredients manually instead.");
+    return suggestIngredients(text, servings, cfg.llm.apiKey, cfg.llm.model);
+  }));
+  api.post("/baskets/recommend", wrap(async (req) => {
+    optionalReadActor(req, "basket-recommend");
+    const body = parse(recommendationSchema, req.body);
+    if (!cfg.llm.apiKey) throw new ServiceError(503, "LLM_NOT_CONFIGURED", "Automatic product selection needs an OpenAI key.");
+    return { recommendations: await recommendIngredients(baskets(), body, cfg.llm.apiKey, cfg.llm.model) };
+  }));
+  api.post("/baskets/search", wrap(async (req) => {
+    optionalReadActor(req, "ingredient-search");
+    const body = parse(z.object({ query: z.string().trim().min(1).max(100), deliveryDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }), req.body);
+    return { products: await baskets().search(body.query, body.deliveryDate) };
+  }));
+  api.post("/baskets/preview", wrap(async (req) => {
+    optionalReadActor(req, "basket-preview");
+    return baskets().preview(parse(basketInputSchema, req.body));
+  }));
+  api.post("/baskets", wrap(async (req) => {
+    const actor = auth(req);
+    const body = parse(z.object({ input: basketInputSchema, fingerprint: z.string().length(64) }), req.body);
+    return baskets().create(actor, body.input, body.fingerprint);
+  }));
+  api.get("/baskets", wrap((req) => (auth(req), { baskets: baskets().list() })));
+  api.get("/baskets/:id", wrap((req) => (auth(req), baskets().get(String(req.params.id)))));
+  api.post("/baskets/:id/approve", wrap(async (req) => {
+    const actor = auth(req);
+    const { fingerprint } = parse(z.object({ fingerprint: z.string().length(64) }), req.body);
+    return baskets().approve(actor, String(req.params.id), fingerprint);
+  }));
+  api.post("/baskets/:id/reject", wrap((req) => {
+    const actor = auth(req);
+    const { fingerprint } = parse(z.object({ fingerprint: z.string().length(64) }), req.body);
+    return baskets().reject(actor, String(req.params.id), fingerprint);
+  }));
+  api.post("/baskets/:id/submit", wrap(async (req) => {
+    const actor = auth(req);
+    const { fingerprint } = parse(z.object({ fingerprint: z.string().length(64) }), req.body);
+    return baskets().submit(actor, String(req.params.id), fingerprint);
+  }));
 
   api.get("/config", (req, res) => {
     const now = clock.now();

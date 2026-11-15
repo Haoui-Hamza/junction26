@@ -113,6 +113,18 @@ CREATE TABLE IF NOT EXISTS provider_state (
   key TEXT PRIMARY KEY,
   value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS ingredient_baskets (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  details_json TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  provider_order_id TEXT,
+  approved_by TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `;
 
 export function nextCounter(db: DB, name: string): number {

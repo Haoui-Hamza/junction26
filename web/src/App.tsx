@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { productIllustration } from "./product-illustration";
+import { IngredientBasket, type Basket } from "./IngredientBasket";
 import {
   ApiError, call, eur, litres, longDate, signedEur, time,
   type AppConfigView, type CatalogView, type Comparison, type IntakeResult, type OptionLine, type OrderOption, type OrderView, type Outcome, type PurchaseRequest, type RevisionView, type Terms,
@@ -20,7 +21,7 @@ interface FormState {
   budgetIsLimit: boolean;
   requestedSku: string;
 }
-const emptyForm: FormState = { category: "milk", lactoseFree: false, organic: false, vegan: false, quantity: "", latestDeliveryDate: "", budgetEur: "", budgetIsLimit: false, requestedSku: "" };
+const emptyForm: FormState = { category: "", lactoseFree: false, organic: false, vegan: false, quantity: "", latestDeliveryDate: "", budgetEur: "", budgetIsLimit: false, requestedSku: "" };
 type FlowStage = "searching" | "details" | "offers" | "preparing" | "manager" | "approved" | "placing" | "complete" | "rejected" | "error";
 
 type Banner = { kind: "info" | "error" | "success" | "warn"; text: string } | null;
@@ -53,6 +54,10 @@ export function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [activity, setActivity] = useState<AgentEvent[]>([]);
   const [flowOpen, setFlowOpen] = useState(false);
+  const [basketOpen, setBasketOpen] = useState(false);
+  const [selectedBasket, setSelectedBasket] = useState<Basket | null>(null);
+  const [basketHints, setBasketHints] = useState<Partial<PurchaseRequest> | null>(null);
+  const [baskets, setBaskets] = useState<Basket[]>([]);
   const [flowStage, setFlowStage] = useState<FlowStage>("searching");
   const flowDialog = useRef<HTMLDialogElement>(null);
 
@@ -90,6 +95,15 @@ export function App() {
   useEffect(() => {
     refreshSide().catch(() => undefined);
   }, [refreshSide]);
+
+  const refreshBaskets = useCallback(async () => {
+    if (cfg?.providerMode !== "valio" || !token("agent")) return;
+    const result = await call<{ baskets: Basket[] }>("GET", "/api/v1/baskets", token("agent"));
+    setBaskets(result.baskets);
+  }, [cfg, token]);
+  useEffect(() => {
+    refreshBaskets().catch((e) => setBanner({ kind: "error", text: `Could not load ingredient baskets: ${e.message}` }));
+  }, [refreshBaskets]);
 
   // Keep the open order fresh (changes may come from the MCP adapter or another tab).
   useEffect(() => {
@@ -174,7 +188,7 @@ export function App() {
           const r = payload.intake;
           setIntake(r);
           setForm({
-            category: r.draft.category ?? "milk",
+            category: r.draft.category ?? "",
             lactoseFree: !!r.draft.requiredAttributes?.includes("lactose_free"),
             organic: !!r.draft.requiredAttributes?.includes("organic"),
             vegan: !!r.draft.requiredAttributes?.includes("vegan"),
@@ -213,6 +227,26 @@ export function App() {
     });
   };
 
+  const startRequest = async (useAgent: boolean) => {
+    setBusy("classify");
+    setBanner(null);
+    try {
+      const result = await call<{ kind: "milk" | "basket"; hints: Partial<PurchaseRequest> }>("POST", "/api/v1/assistant/classify", token("agent"), { text, manual: !useAgent });
+      if (result.kind === "basket") {
+        setBasketHints(result.hints);
+        setSelectedBasket(null);
+        setBasketOpen(true);
+      } else {
+        if (useAgent) await runAgent();
+        else await parse();
+      }
+    } catch (e) {
+      setBanner({ kind: "error", text: e instanceof Error ? e.message : "Could not understand the request. Please try again." });
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const formToRequest = (): PurchaseRequest => ({
     rawText: text,
     category: form.category,
@@ -233,7 +267,7 @@ export function App() {
       setIntake(r);
       setComparison(null);
       setForm({
-        category: r.draft.category ?? "milk",
+        category: r.draft.category ?? "",
         lactoseFree: !!r.draft.requiredAttributes?.includes("lactose_free"),
         organic: !!r.draft.requiredAttributes?.includes("organic"),
         vegan: !!r.draft.requiredAttributes?.includes("vegan"),
@@ -338,7 +372,7 @@ export function App() {
         </a>
         <nav className="market-links" aria-label="Main navigation">
           <a className="selected" href="#request">New order</a>
-          <a href="#orders" onClick={() => setOrdersOpen(true)}>Orders <span className="count">{orders.length}</span></a>
+          <a href="#orders" onClick={() => setOrdersOpen(true)}>Orders <span className="count">{orders.length + baskets.length}</span></a>
         </nav>
         <div className="market-account">
           <span className={`badge provider-${cfg.providerMode}`} title={[cfg.provider.description, ...cfg.provider.gaps].join("\n")}>
@@ -376,8 +410,8 @@ export function App() {
           <label className="visually-hidden" htmlFor="shopping-request">What would you like to order?</label>
           <textarea id="shopping-request" value={text} onChange={(e) => setText(e.target.value)} rows={4} placeholder="For example: 100 litres of lactose-free milk by Monday, ideally under €500" />
           <div className="row">
-            {cfg.llm.enabled && <button className="primary" onClick={runAgent} disabled={!!busy || !text.trim()}>Find options with Aimo <span aria-hidden="true">→</span></button>}
-            <button className={cfg.llm.enabled ? "secondary-action" : "primary"} onClick={() => parse()} disabled={!!busy || !text.trim()}>{cfg.llm.enabled ? "Review request details" : "Start my order"}</button>
+            {cfg.llm.enabled && <button className="primary" onClick={() => startRequest(true)} disabled={!!busy || !text.trim()}>{busy === "classify" ? "Understanding your request…" : "Find options with Aimo"} <span aria-hidden="true">→</span></button>}
+            <button className={cfg.llm.enabled ? "secondary-action" : "primary"} onClick={() => startRequest(false)} disabled={!!busy || !text.trim()}>{cfg.llm.enabled ? "Review request details" : "Start my order"}</button>
           </div>
           <p className="muted small">
             Your budget and the manager-approval limit are separate. Orders above your stated budget, or above {eur(cfg.policy.autoLimitCents)}, are sent for manager review.
@@ -436,8 +470,8 @@ export function App() {
         </section>
 
         <details className="card orders-card" id="orders" open={ordersOpen} onToggle={(event) => setOrdersOpen(event.currentTarget.open)}>
-          <summary>Recent orders ({orders.length})</summary>
-          {orders.length === 0 ? <p className="muted">Your orders will appear here.</p> : (
+          <summary>Recent orders ({orders.length + baskets.length})</summary>
+          {orders.length === 0 && baskets.length === 0 ? <p className="muted">Your orders will appear here.</p> : orders.length > 0 && (
             <table className="small">
               <thead><tr><th>Order</th><th>Status</th><th>Amount</th><th>Total</th></tr></thead>
               <tbody>
@@ -449,8 +483,11 @@ export function App() {
               </tbody>
             </table>
           )}
+          {baskets.length > 0 && <div className="basket-history"><h3>Ingredient baskets</h3>{baskets.map((item) => <button key={item.id} onClick={() => { setSelectedBasket(item); setBasketHints(null); setBasketOpen(true); }}>{item.id} · {item.details.input.description} · {eur(item.details.totalCents)} · {item.status.replaceAll("_", " ")}</button>)}</div>}
         </details>
       </main>
+
+      {basketOpen && <IngredientBasket text={text} today={cfg.clock.today} agentToken={token("agent")} approverToken={token("approver")} llmEnabled={cfg.llm.enabled} existing={selectedBasket} hints={basketHints} onClose={() => setBasketOpen(false)} onChanged={() => { refreshBaskets().catch((e) => setBanner({ kind: "error", text: `Could not refresh ingredient baskets: ${e.message}` })); }} />}
 
       <dialog
         ref={flowDialog}
@@ -488,13 +525,14 @@ export function App() {
               <>
                 <div className="request-summary">
                   <b>Please check what we understood</b>
-                  <span>{form.quantity || "?"} litres of {form.category === "plant_milk" ? "plant-based milk" : "dairy milk"}</span>
+                  <span>{form.quantity || "?"} litres of {form.category === "plant_milk" ? "plant-based milk" : form.category === "milk" ? "dairy milk" : "an unspecified product"}</span>
                   {form.latestDeliveryDate && <span>Needed by {longDate(form.latestDeliveryDate)}</span>}
                   {form.budgetEur && <span>{form.budgetIsLimit ? "Budget limit" : "Target budget"}: €{form.budgetEur}</span>}
                 </div>
                 <div className="fields flow-fields">
                   <label>Product
                     <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value, vegan: e.target.value === "plant_milk" || form.vegan })}>
+                      <option value="">Select a supported product</option>
                       <option value="milk">Dairy milk</option>
                       <option value="plant_milk">Plant-based milk</option>
                     </select>
@@ -532,7 +570,7 @@ export function App() {
                 {intake.notes.length > 0 && <ul className="notes">{intake.notes.map((note) => <li key={note}>{note}</li>)}</ul>}
                 <div className="row flow-actions">
                   <button onClick={() => setFlowOpen(false)}>Change my request</button>
-                  <button className="primary" onClick={compare} disabled={!!busy || !form.quantity || !form.latestDeliveryDate}>Find matching options</button>
+                  <button className="primary" onClick={compare} disabled={!!busy || !form.category || !form.quantity || !form.latestDeliveryDate}>Find matching options</button>
                 </div>
               </>
             )}
@@ -557,22 +595,22 @@ export function App() {
         {(flowStage === "preparing" || flowStage === "placing") && (
           <div className="flow-progress" aria-live="polite">
             <span className="loading-spinner" aria-hidden="true" />
-            <h3>{flowStage === "placing" ? cfg.provider.orderMode === "simulated" ? "Recording your simulated order" : "Placing your approved order" : "Preparing your order"}</h3>
+            <h3>{flowStage === "placing" ? "Processing your order" : "Preparing your order"}</h3>
             <p>{flowStage === "placing" ? cfg.provider.orderMode === "simulated" ? "Rechecking the live quote, then recording it locally. Nothing is sent to Valio." : "Checking the final price and sending the order to the supplier." : "Checking the latest price and whether manager approval is needed."}</p>
           </div>
         )}
 
         {(flowStage === "manager" || flowStage === "approved") && order && (
           <div className="flow-stage">
-            {flowStage === "approved" && <div className="banner success">{cfg.provider.orderMode === "simulated" ? "Approved. Record the simulated order when you’re ready." : "Approved. Place the order when you’re ready."}</div>}
+            {flowStage === "approved" && <div className="banner success">Approved. Place the order when you’re ready.</div>}
             <OrderPanel order={order} cfg={cfg} busy={!!busy} approverName={actorName("approver")} onDecide={decide} onReconcile={reconcile} />
           </div>
         )}
 
         {flowStage === "complete" && order && (
-          <section className="flow-complete">
+          <section className="flow-complete" role="status">
             <span className="complete-mark" aria-hidden="true">✓</span>
-            <h3>{cfg.provider.orderMode === "simulated" ? "Simulated order recorded" : "Your order is placed"}</h3>
+            <h3>{cfg.provider.orderMode === "simulated" ? "Order recorded successfully" : "Your order is placed"}</h3>
             <p>{litres(order.currentRevision.terms.volumeMl)} · {eur(order.currentRevision.terms.totalCents)} · delivery by {longDate(order.currentRevision.terms.latestDeliveryDate)}</p>
             <p className="muted">{cfg.provider.orderMode === "simulated" ? "Simulation only — no order was sent to Valio. Reference:" : "Supplier confirmation:"} <b>{order.providerOrderId ?? "received"}</b></p>
             <button className="primary" onClick={() => setFlowOpen(false)}>Done</button>
@@ -607,7 +645,7 @@ function Status({ s }: { s: string }) {
     awaiting_approval: "Needs manager approval",
     requote_required: "Price changed — review again",
     submission_unknown: "Checking order status",
-    submitted: "Order placed",
+    submitted: "Completed",
     approved: "Approved",
     rejected: "Declined",
     returned_to_buyer: "Needs changes",
@@ -774,7 +812,7 @@ function ComparisonView({ c, busy, allowOrder, onPrepare, onRevise }: { c: Compa
           {allowOrder ? (
             <>
               <p>{budgetExceeded ? "You can ask a manager to review this over-budget option. Nothing is recorded before the review." : "Continue to the simulated order. Nothing will be sent to the supplier."}</p>
-              <button className="primary" onClick={onPrepare} disabled={busy}>{budgetExceeded ? "Ask manager to review" : "Continue to simulated order"}</button>
+              <button className="primary" onClick={onPrepare} disabled={busy}>{budgetExceeded ? "Ask manager to review" : "Continue to order"}</button>
             </>
           ) : (
             <p className="muted">These are current supplier quotes for comparison only. Ordering is not available in this supplier setup.</p>
@@ -887,7 +925,7 @@ function OrderPanel({ order, cfg, busy, approverName, onDecide, onReconcile }: {
             </>
           )}
           {order.status === "approved" && (
-            <button className="primary" disabled={busy} onClick={() => onDecide("submit", ref)}>{order.provider.orderMode === "simulated" ? "Record simulated order" : "Place approved order"}</button>
+            <button className="primary" disabled={busy} onClick={() => onDecide("submit", ref)}>Place order</button>
           )}
           {order.status === "submission_unknown" && <button className="primary" disabled={busy} onClick={onReconcile}>Check whether it was placed</button>}
         </div>
@@ -901,8 +939,8 @@ function OrderPanel({ order, cfg, busy, approverName, onDecide, onReconcile }: {
       </section>
 
       {order.status === "submitted" && (
-        <section className="card confirm">
-          <h2>{order.provider.orderMode === "simulated" ? "Simulated order recorded" : "Order placed"}</h2>
+        <section className="card confirm" role="status">
+          <h2>{order.provider.orderMode === "simulated" ? "Order recorded successfully" : "Order placed"}</h2>
           <p>{litres(cur.terms.volumeMl)} · {eur(cur.terms.totalCents)} · delivery by {longDate(cur.terms.latestDeliveryDate)}</p>
           {order.provider.orderMode === "simulated" && <p className="muted small">Simulation only — no order was sent to Valio.</p>}
           <details>
